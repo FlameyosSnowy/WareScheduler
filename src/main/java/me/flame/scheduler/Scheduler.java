@@ -3,81 +3,86 @@ package me.flame.scheduler;
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.*;
+import java.util.*;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.logging.Logger;
 
 public class Scheduler {
-    static final List<Future<?>> TASKS = new ArrayList<>(5);
-    private static ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
+    static final Map<Integer, Task> TASKS = new HashMap<>(5);
+    static int TASK_IDS = 0;
 
-    public static final int NUM_THREADS = Runtime.getRuntime().availableProcessors();
+    static final Logger LOGGER = Logger.getLogger("Scheduling");
 
-    private static boolean eagerService;
+    private static final Timer TIMER = new Timer();
 
-    /**
-     * Will make the static scheduled executor service allocate ALL the threads in the CPU.
-     * @apiNote Please know what you're doing when executing this,
-     *          <p>
-     *          this may have huge impacts on performance and block.
-     *          <p>
-     *          Use this if you know you will use EVERY thread.
-     *          <p>
-     *          Side effects of using this improperly: resource-exhaustion and a big unnecessary block
-     * @since 1.0.0
-     */
-    public static void eagerThreadInitialization() {
-        if (service != null && (eagerService || NUM_THREADS == 1)) return;
-        Scheduler.service = Executors.newScheduledThreadPool(NUM_THREADS);
-        Scheduler.eagerService = true;
+    public static TaskBuilder factory() {
+        return new Scheduler.TaskBuilder();
     }
 
-    public static SyncScheduler.TaskBuilder sync() {
-        return new SyncScheduler.TaskBuilder();
-    }
-
-    public static Scheduler.TaskBuilder factory() {
-        return new Scheduler.TaskBuilder(Scheduler.service);
+    public static AsyncScheduler.TaskBuilder async() {
+        return new AsyncScheduler.TaskBuilder(AsyncScheduler.service);
     }
 
     @NotNull
     @Contract(value = "_ -> new", pure = true)
-    public static Scheduler.TaskBuilder factory(ScheduledExecutorService service) {
-        return new Scheduler.TaskBuilder(service);
+    public static AsyncScheduler.TaskBuilder async(ScheduledExecutorService service) {
+        return new AsyncScheduler.TaskBuilder(service);
+    }
+
+    public static void cancel(int taskId) {
+        Task task = TASKS.get(taskId);
+        if (task != null) task.cancel();
     }
 
     public static class TaskBuilder {
-        private final ScheduledExecutorService service;
         private Runnable task;
-        private int delay = -1, repeat = -1;
+        private long delay = -1, repeat = -1;
 
-        public TaskBuilder(ScheduledExecutorService service) {
-            Objects.requireNonNull(service);
-            this.service = service;
-        }
-
-        public Scheduler.TaskBuilder delay(int delay) {
+        public Scheduler.TaskBuilder delay(long delay, long repeatDelay) {
+            if (delay < 0 || repeatDelay < 0) {
+                throw new IllegalArgumentException("Delay/repeat delay must not be under -1. \nDelay before Starting: " + delay + "\nRepeat period: " + repeatDelay);
+            }
             this.delay = delay;
-            return this;
-        }
-
-        public Scheduler.TaskBuilder repeat(int repeatDelay) {
             this.repeat = repeatDelay;
             return this;
         }
 
+        public Scheduler.TaskBuilder delay(long delay) {
+            if (delay < 0) {
+                throw new IllegalArgumentException("Delay/repeat delay must not be under -1. \nDelay before Starting: " + delay);
+            }
+            this.delay = delay;
+            return this;
+        }
+
         public Scheduler.TaskBuilder task(Runnable task) {
+            Objects.requireNonNull(task);
             this.task = task;
             return this;
         }
 
-        public Future<?> execute() {
-            if (repeat == -1) {
-                if (delay == -1) {
-                    return service.submit(task);
+        public Task execute() {
+            TimerTask timerTask = new TimerTask() {
+                @Override
+                public void run() {
+                    task.run();
                 }
+            };
+            Task scheduledTask = new Task(timerTask, TASK_IDS);
+            TASK_IDS++;
+
+            if (repeat == -1) {
+                if (delay != -1) {
+                    TIMER.schedule(timerTask, delay);
+                    return scheduledTask;
+                }
+                LOGGER.warning("Could be useless synchronous scheduling, delay and repeat undefined, did you mean this to add delay/repeat?");
+                task.run();
+                return scheduledTask;
             }
+
+            TIMER.scheduleAtFixedRate(timerTask, delay == -1 ? 0 : delay, repeat);
+            return scheduledTask;
         }
     }
 }
